@@ -1,0 +1,10 @@
+{
+  "name": "dsh-group-attention",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "description": "Topic attention window for DSH OneBot group conversations",
+  "dsh": {"bundle": {"patch": "./cordis.patch.yml"}},
+  "peerDependencies": {"@deepseek-ai/schemastery": "*"}
+}

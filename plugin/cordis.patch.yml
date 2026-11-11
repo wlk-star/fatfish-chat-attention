@@ -1,0 +1,18 @@
+# 在 profile 的 patch 层指定真实群号后启用。默认 dryRun=true，不会主动请求回复。
+- insert:
+    - id: group-attention
+      name: dsh-group-attention
+      config:
+        groupId: ''
+        dryRun: true
+        provider: zzapi
+        model: gpt-6.1-terra
+        attentionMinutes: 8
+        maxAttentionMinutes: 30
+        quietSeconds: 8
+        maxBatchSeconds: 25
+        classifyIntervalSeconds: 20
+        cooldownSeconds: 60
+        maxAutoReplies: 3
+        unrelatedLimit: 2
+        dailyClassifyLimit: 60
