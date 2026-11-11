@@ -1,45 +1,64 @@
-# QQ 桥接接线契约
+# QQ 桥接与 L0-L6 关系注意力接线契约
 
-本目录只包含独立的候选令牌管理器，不包含整套 QQ 桥接。把本插件接到其他桥接前，必须实现并测试以下契约。
+本目录包含面向 OneBot v11 的两套解耦桥接组件：
+1. `attention-candidates.js`：短期一次性候选令牌管理器与缓冲摘要去重（`createAttentionCandidateStore`、`attentionDigestItems`）。
+2. `onebot-enrichment.mjs`：L0 永久身份锚点（`昵称(qq:userId)`）与引用链（`[CQ:reply,id=...]` / `seg.type === 'reply'`）解析与格式化工具（`normalizeParticipantId`、`extractReplySegment`、`formatIdentityTag`、`formatInboundLine`、`formatDigestLine`、`parseInboundLine`）。
 
-## 入站事件
+## 1. L0 身份锚点与引用段入站契约
 
-仅在 OneBot 的真实群消息通过该桥接自己的群白名单后发布：
+- **严禁仅凭群昵称识别身份**：所有 `renderInbound` 与 `renderDigest` 输出必须使用 `formatIdentityTag({ userId, nickname })` 渲染为 `昵称(qq:userId)`（无昵称时回退 `qq:userId`），确保群成员改名后仍与 L3 `Participant` / `RelationEdge` 永久绑定。
+- **保留 `[CQ:reply]` 引用信息**：`mapOneBotMessage(event, selfId)` 必须通过 `extractReplySegment` 提取 `{ replyToMessageId, replyToUserId }`，并根据桥接已发送消息表判定 `replyToSelf`：
+  - 群聊中若 `replyToSelf === true`（引用了蓝蓝/大肥鱼的消息），即使未显式 `@蓝蓝`，`decide()` 也应返回 `{ action: 'wake', reason: 'reply-to-self' }`。
+
+仅在真实群消息通过群白名单后发布 `qq-bridge/inbound`：
 
 ```js
 ctx.emit('qq-bridge/inbound', {
   transport: true,
-  message: {groupId, userId, nickname, text, atSelf, messageId},
-  decision: {action: 'wake' | 'record' | 'drop', reason},
+  message: {
+    groupId,
+    userId,
+    nickname,
+    text,
+    atSelf,
+    messageId,
+    replyToMessageId,
+    replyToUserId,
+    replyToSelf,
+  },
+  decision: { action: 'wake' | 'record' | 'drop', reason },
   candidateToken, // 仅 record 且真实消息 id 有效时提供
   at: Date.now(),
 })
 ```
 
 - 人工模拟、私聊、非白名单群和缺少消息 ID 的记录不得创建可消费候选。
-- 唤醒消息可在正常投递时发布，普通消息必须**先完成缓冲落盘**，再发布 `record`，防止同一消息被原流程与注意力流程并发处理。
+- 普通消息必须**先完成缓冲落盘**，再发布 `record`，防止同一消息被原流程与注意力流程并发处理。
 - 只传必要字段：不要传图片 URL、token、私聊历史或附件本体。
-- 桥接仅在实际向 QQ 群发送成功后，发布 `qq-bridge/outbound`：`{groupId, text}`；注意力层用其补充蓝蓝的短期上下文。
+- 桥接仅在实际向 QQ 发送成功后发布 `qq-bridge/outbound`：`{ groupId, text, messageId }`。
 
-## 注意力请求
+## 2. 注意力唤醒与摘要去重
 
 ```js
-ctx.on('qq-bridge/attention-wake', async ({candidateToken}) => {
+ctx.on('qq-bridge/attention-wake', async ({ candidateToken }) => {
   const message = candidates.consume(candidateToken, msg => isStillAllowlisted(msg))
   if (!message) return
   await handleInbound(message, true, true)
 })
 ```
 
-`candidateToken` 必须由桥接为真实入站记录生成，短期有效、一次性消费，不能由请求方提供任意消息或目标。`handleInbound` 的注意力路径仍须复用原来的群白名单、会话映射、图片、模型和出站限制，不得绕开权限或直接发消息。
+- `candidateToken` 由桥接为真实入站消息签发，短期有效、一次性消费，并复核群白名单。
+- 唤醒同一条消息时调用 `attentionDigestItems(bufferSnapshot, message, true)`，从历史摘要中剔除本轮主输入，避免重复展示。
 
-## 去重
+## 3. L6 拟人分段发送与多话题自动引用（`relationalAttention` 服务联动）
 
-为缓冲条目记录 `sourceMessageId`。注意力唤醒同一条消息时，调用 `attentionDigestItems(bufferSnapshot, message, true)`，从摘要排除当前消息；当前消息仍正常作为本轮输入。成功投递后按原有快照语义清理对应缓冲，失败则保留，避免漏消息。
+桥接在 `sendToQQ` 出站阶段可按需读取 `ctx.get?.('relationalAttention')`：
 
-## 部署前检查
+1. **多话题防串线自动引用**：读取 `getActiveStage(sessionId)` 计算当前活跃话题数 `activeTopicCount = (focused ? 1 : 0) + warm.length`。当 `activeTopicCount >= 2` 或配置 `replyWithQuote === true` 时，通过 `humanizer.selectReplyQuoteId` 在首条气泡前附带 `{ type: 'reply', data: { id: targetMessageId } }`。
+2. **自然多气泡呼吸感节奏**：对于纯文本回复（不含图片段），通过 `humanizer.splitIntoHumanBubbles(text)` 拆分为最多 3 条自然短句气泡，气泡间按 `humanizer.computeTypingDelayMs(bubble)` 等待拟人打字延迟，且绝不拆断代码块或 `[QQ]...[/QQ]` 包裹。
 
-- 确认群聊使用独立会话与人格，私聊记忆不会被注入群会话。
-- 明确其他机器人是否列入忽略名单，测试冷却、批次合并和日预算。
-- 测试分类器超时、消息并发、重连、候选过期/重放及白名单撤销。
-- 默认使用 `dryRun: true`，观察决策后再开启实际群回复。
+## 4. 安全与隔离检查清单
+
+- **单向隐私门禁（`ScopeGate`）**：群聊会话（`group:*`）严禁读取 `private:*` 事实、经历或 `feiyu-mood` 情绪原因；私聊主人会话（`private:qq:1024162823`）可主动分享群内公开趣事。
+- **Preset 工具注册铁律**：`focus_attention` 与 `remember_relation` 通过 `agent.ctx.tools.register` 按会话挂载，**严禁**写入 preset 的 `ctx.tools.restrict({ allow })`，仅加入 `ctx.tools.guard` 的 `permitted()` 与 `system-prompt/assemble` 的工具过滤白名单。
+- **桌宠零污染**：仅对 `allowedSessions` 白名单会话挂载工具与上下文投影，桌宠会话（如 `fish-chat`）保持 `toolSchemaCount === 0`。

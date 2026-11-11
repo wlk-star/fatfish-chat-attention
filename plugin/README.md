@@ -1,44 +1,61 @@
-# DSH 群聊话题注意力插件：交接说明
+# Fatfish Relational Attention Suite (大肥鱼/蓝蓝 L0-L6 拟人陪伴连续性系统)
 
-这是当前运行中的 DSH + OneBot 群聊注意力插件的**可移植交接副本**，供后续开发者或 AI 继续修改。它目前实现的是一个群一个注意力窗口；下一步目标是**先实现私聊“以人为对象、聊天内容为话题”的多话题注意力，再扩展到群聊中的多人多话题**。
+面向 DeepSeek Harness (`v0.2.2-rc.1`) + OneBot v11 的全栈**多人多话题关系注意力与陪伴连续性插件**（兼容原 `dsh-group-attention` 插件名与事件总线）。
 
-## 已有能力
-
-- 受控群聊消息被点名或 @ 后进入注意力状态；非点名消息按批次收集。
-- 独立模型判断近期消息是否延续话题、是否适合插话、话题是否结束；模型出错或输出无效 JSON 时保持静默。
-- 安静等待、批量上限、模型调用间隔、自动回复冷却、单窗口回复上限、每日调用预算和最长关注时间。
-- 分类期间出现新消息时，旧结果作废并重新合并，防止使用过时语境发言。
-- 只持久化关注状态和计数，不把群消息正文写进本插件状态文件。群消息的收集和短暂提供给配置的 LLM 是此功能的一部分。
-- 桥接侧的一次性短期候选令牌、群白名单复核和消息摘要去重示例在 `bridge/` 中。
-
-## 当前架构
+## L0-L6 分层架构概览
 
 ```text
-OneBot → QQ 群桥接 → qq-bridge/inbound → 注意力状态机 → LLM 判断
-                                                   ↓
-                桥接 ← qq-bridge/attention-wake {candidateToken}
-                  ↓ 令牌与白名单复核
-              既有群会话 → QQ
+OneBot v11 (私聊 / 群聊)
+  │
+  ▼  L0 感知富化层 (bridge/onebot-enrichment.mjs + attention-candidates.js)
+  │   - 永久身份锚点 `昵称(qq:userId)`（改群名片不丢人）
+  │   - `[CQ:reply]` 引用链提取与引用蓝蓝自动唤醒
+  ▼
+  ├─► L1 实时多人话题舞台 (attention/multi-topic-engine.mjs + classifier.mjs + engine.mjs)
+  │   - Topic Stage × Participant Cohort（区分焦点话题与温热挂起话题，保留全部参与人及其立场）
+  │   - SubHeartflow 风格多话题分类与插话意愿门控
+  │
+  ├─► L2 KV-Cache 友好快照与经历结晶 (projection/snapshot-quantizer.mjs + episode-crystallizer.mjs)
+  │   - Epoch 锁定的零动态时间戳快照（群聊 ≤450 tokens / 私聊 ≤150 tokens，同话题连续轮次字节级恒等）
+  │   - 监听 `compaction/summary` 与温热话题归档，结晶为 `SharedEpisode`
+  │   - 按需调用 `focus_attention` 通过 `tool/result` 展开挂起话题、共同经历或原始对话切片
+  │
+  ├─► L3 关系图谱与单向隐私门禁 (store/sqlite-repo.mjs + schema.mjs + tokenizer.mjs)
+  │   - 基于 `node:sqlite` WAL + CJK 二元分词 FTS5（零原生编译依赖）
+  │   - `Participant` + 时序双状态 `RelationEdge` + `Topic` + `SharedEpisode`
+  │   - `ScopeGate` 硬隔离：`group:*` 绝不可读取 `private:*`；`private:qq:1024162823` 可感知群内公开高光
+  │
+  ├─► L4 情感余温投影与工具记忆守卫 (connectors/mood-connector.mjs + tools/remember-relation.mjs)
+  │   - 私聊经历归档附带 `dsh-feiyu-mood` 情绪切片；群聊仅投射脱敏数值语气偏置（`careBias`），剥离私聊原因文本
+  │   - `remember_relation` 强制信任分级：群友口述一律标为 `self_claimed_tentative`，禁止篡改核心亲属关系
+  │
+  ├─► L5 自主挂念与回溯同步 (connectors/speakup-connector.mjs + rewind-connector.mjs + memory-connector.mjs)
+  │   - 精准过滤 `speak-up` / `runtime-context` 内部触发源，提供 `listOpenTopics` 未完话题目录
+  │   - 监听全局 `session/event` 中 `source.kind === 'dsh-rewind'`，自动失效被回滚序号覆盖的经历与话题
+  │
+  └─► L6 拟人呼吸感表达层 (expression/humanizer.mjs)
+      - 多话题并发时自动挂载 `[CQ:reply]` 引用回复防串线
+      - 长句自然拆分为 1-3 条短气泡并模拟打字停顿，严格保护 `[QQ]...[/QQ]` 与代码块完整性
 ```
 
-`engine.mjs` 是与 DSH 解耦的调度与策略核心；`index.mjs` 是 Cordis/DSH 适配层和 LLM 分类器；`host-peer.mjs` 解析宿主 LLM 依赖。事件契约及桥接接线见 [bridge/INTEGRATION.md](bridge/INTEGRATION.md)。运行代码需要支持上述事件的桥接插件，单独安装本包不能接收 QQ 消息。
+## 核心铁律（DSH v0.2.2-rc.1 适配）
 
-## 已知限制和后续目标
+1. **零 System Prompt 膨胀**：每轮仅注入紧凑静态目录快照，禁止塞入相对时间或滚动原文；细节一律由 `focus_attention` 走 `tool/result`（可被 `ToolResultPruner` 自动修剪）。
+2. **桌宠零污染**：仅对 `allowedSessions` 显式白名单会话挂载工具与上下文投影，桌宠会话（如 `session-6e7760fd-1ac1-4387-a765-5b7d25697b10`）严格保持 `toolSchemaCount === 0`。
+3. **Preset 工具白名单纪律**：`focus_attention` 与 `remember_relation` 注册在 `agent.ctx.tools` 上，**绝不能**放入 preset 的 `ctx.tools.restrict({ allow })`，仅加入 `ctx.tools.guard` 的 `permitted()` 与 `system-prompt/assemble` 过滤器。
+4. **纯 Node 与 Electron 双环境可测**：`host-peer.mjs` 在 `apply()` 阶段惰性解析宿主依赖并提供离线测试回退，既支持本地 `node --test`，也支持宿主 `DeepSeek Harness.exe` 运行时测试。
 
-1. **当前只有一个群级活动窗口**：不能区分多人并行交谈，也不应把它称为人级话题记忆。
-2. 现有历史窗口在内存中，重启后活动话题不会恢复；LLM 语义判断可能误判。
-3. 下一版优先建立平台无关的 `ConversationParticipant`、`Topic` 和 `ParticipantTopic`；先在单个私聊内测试同一人切换多个话题，再引入群聊时间线、QQ 号身份、引用与多参与者。
-4. 个人资料、群共享事实、私聊记录必须明确分层；禁止默认把私聊内容带入群聊，关系事实需记录来源及确认状态。
-5. 支持多个活动话题时，要处理指代歧义、同一成员多话题、并发消息、模型调用费用和机器人互相接话。不要仅靠昵称作为身份。
-6. 需补齐真实 QQ 入站与出站、断线恢复、流量限制、长期窗口及用户数据迁移的集成测试。当前 11 项离线测试及一次合成输入的真实模型试运行通过；用户此前实际验证过一次无点名后续接话。
+## 测试命令
 
-## 使用与测试
+本地纯 Node（v22.5+ / v24+）：
 
-`cordis.patch.yml` 是配置模板；必须提供实际群号、存在的模型服务和模型名。默认 `dryRun: true`，只记录将会唤醒，不会自动请求发言。请先在隔离环境运行和审查。
+```bash
+node --test ./plugin/**/*.test.mjs ./plugin/**/*.test.js
+```
+
+Windows DSH Electron 宿主运行时：
 
 ```powershell
 $env:ELECTRON_RUN_AS_NODE='1'
-& 'D:\dsh\DeepSeek Harness.exe' --test .\index.test.mjs .\bridge\attention-candidates.test.js
+& 'D:\dsh\DeepSeek Harness.exe' --test .\index.test.mjs .\integration.test.mjs .\bridge\attention-candidates.test.js .\bridge\onebot-enrichment.test.mjs .\store\sqlite-repo.test.mjs .\attention\multi-topic-engine.test.mjs .\tools\tools.test.mjs .\expression\humanizer.test.mjs
 ```
-
-实际宿主路径和依赖可能不同；`host-peer.mjs` 需要运行在可解析 DSH peer 依赖的环境中。插件不包含凭据、QQ 配置、聊天记录或记忆数据。

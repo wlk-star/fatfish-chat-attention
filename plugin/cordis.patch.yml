@@ -1,18 +1,37 @@
-# 在 profile 的 patch 层指定真实群号后启用。默认 dryRun=true，不会主动请求回复。
+# L0-L6 大肥鱼/蓝蓝多人多话题关系注意力与陪伴连续性插件配置模板
+# 注意：
+# 1. 默认 dryRun=true，观察决策稳定后再改为 false。
+# 2. allowedSessions 严格显式白名单挂载，绝不触碰桌宠会话（如 fish-chat），确保桌宠 toolSchemaCount === 0。
+# 3. focus_attention 与 remember_relation 由插件通过 agent.ctx 按会话注册，切勿写入 preset 的 ctx.tools.restrict({ allow })。
+# 4. 针对 1M 上下文窗口模型（如 zzapi/gpt-6.1-terra，defaultContextWindow: 1000000），建议在陪伴 preset
+#    （xiaoman-chat / lanlan-group-chat）的 compaction 组（需同时声明 isolate: { compaction: true, toolResultPruner: true }）
+#    中启用 @deepseek-ai/dsh-compaction-tool-result-pruner 并将 @deepseek-ai/dsh-compaction-basic 设为
+#    { thresholdRatio: 0.02, retainRatio: 0.005 }（~20k 触发 / ~5k 保留）。
 - insert:
-    - id: group-attention
-      name: dsh-group-attention
+    - id: lanlan-group-attention
+      name: 'file:///D:/AI-Fish/sources/dsh-group-attention/index.mjs'
       config:
-        groupId: ''
+        groupId: '1135493428'
         dryRun: true
         provider: zzapi
         model: gpt-6.1-terra
-        attentionMinutes: 8
-        maxAttentionMinutes: 30
+        ownerId: 'qq:1024162823'
+        brotherId: 'qq:616860663'
+        dshHome: 'C:/Users/Administrator/.dsh'
+        dbPath: 'C:/Users/Administrator/.dsh/relational-attention/relational.sqlite'
+        statePath: 'C:/Users/Administrator/.dsh/relational-attention/state.json'
+        fishMemorySeedPath: 'C:/Users/Administrator/.dsh/fish-memory/session-1c2e0af0-9f78-45cb-b7b2-d07a4a44e2fd.json'
+        allowedSessions:
+          session-1c2e0af0-9f78-45cb-b7b2-d07a4a44e2fd: 'private:qq:1024162823'
+          session-fb1e56d7-9651-40eb-9f42-d25702e8641b: 'group:1135493428'
+        warmTtlMinutes: 45
+        consolidationIntervalMinutes: 10
+        attentionMinutes: 120
+        maxAttentionMinutes: 180
         quietSeconds: 8
         maxBatchSeconds: 25
         classifyIntervalSeconds: 20
         cooldownSeconds: 60
-        maxAutoReplies: 3
+        maxAutoReplies: 12
         unrelatedLimit: 2
         dailyClassifyLimit: 60
